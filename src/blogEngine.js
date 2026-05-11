@@ -11,7 +11,9 @@ import { assembleMarkdown } from './markdownAssembler.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
-const MODEL = 'llama-3.3-70b-versatile';
+const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
+const FALLBACK_MODEL = 'openai/gpt-oss-120b';
+const CONTENT_MODELS = [PRIMARY_MODEL, FALLBACK_MODEL];
 const TAVILY_KEY = process.env.TAVILY_API_KEY;
 const MAX_TAVILY_CALLS = 4;
 const MIN_WORD_COUNT = 1000;
@@ -94,6 +96,32 @@ function isGenericTitle(title = '') {
 
 function hasGeneratedArtifacts(content = '') {
   return /<function=|\b(?:tavily_search|finish_blog)\s*\(|Next,\s+I\s+will\s+search|Visual Brief|OPENING HOOK|PROBLEM FRAMING|CORE BODY|FAQ SECTION/i.test(content);
+}
+
+function isRateLimitError(err) {
+  return err?.status === 429
+    || err?.code === 'rate_limit_exceeded'
+    || err?.error?.code === 'rate_limit_exceeded'
+    || /rate limit/i.test(err?.message || '');
+}
+
+async function createChatCompletionWithFallback(payload, purpose) {
+  let lastError = null;
+
+  for (const model of CONTENT_MODELS) {
+    try {
+      if (model !== PRIMARY_MODEL) {
+        const fromModel = lastError?.model || PRIMARY_MODEL;
+        console.warn(`[Blog Engine] ${purpose}: primary model hit a rate limit, falling back from ${fromModel} to ${model}`);
+      }
+      return await groq.chat.completions.create({ ...payload, model });
+    } catch (err) {
+      lastError = err;
+      if (!isRateLimitError(err)) throw err;
+    }
+  }
+
+  throw lastError;
 }
 
 async function generateValidContent(brand, pastSlugs, internalLinks, brandConfig) {
@@ -224,14 +252,13 @@ IMPORTANT: Wrap your tool calls in backticks and use valid JSON for arguments.`;
 
   // Agentic loop
   while (!blogResult) {
-    const response = await groq.chat.completions.create({
-      model: MODEL,
+    const response = await createChatCompletionWithFallback({
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
       // tools, // REMOVED: Using manual parsing for better stability on Groq
       // tool_choice: 'auto',
       max_tokens: 4000,
       temperature: 0.7,
-    });
+    }, 'Content generation');
 
     const msg = response.choices[0].message;
     messages.push(msg);
@@ -326,7 +353,7 @@ Return ONLY valid JSON with this structure:
 }`;
 
   const response = await groq.chat.completions.create({
-    model: MODEL,
+    model: PRIMARY_MODEL,
     messages: [{ role: 'user', content: prompt }],
     max_tokens: 300,
     temperature: 0.3,
