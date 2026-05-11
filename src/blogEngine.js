@@ -12,8 +12,6 @@ import { assembleMarkdown } from './markdownAssembler.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
-const FALLBACK_MODEL = 'groq/compound';
-const CONTENT_MODELS = [PRIMARY_MODEL, FALLBACK_MODEL];
 const TAVILY_KEY = process.env.TAVILY_API_KEY;
 const MAX_TAVILY_CALLS = 4;
 const MIN_WORD_COUNT = 1000;
@@ -98,25 +96,13 @@ function hasGeneratedArtifacts(content = '') {
   return /<function=|\b(?:tavily_search|finish_blog)\s*\(|Next,\s+I\s+will\s+search|Visual Brief|OPENING HOOK|PROBLEM FRAMING|CORE BODY|FAQ SECTION/i.test(content);
 }
 
-function limitLines(text = '', maxLines = 8) {
-  return String(text)
-    .split('\n')
-    .filter(Boolean)
-    .slice(0, maxLines)
-    .join('\n');
-}
+function buildSystemPrompt({ brandConfig, blogSkill, brandProfile, pastSlugs, internalLinks }) {
+  return `${blogSkill}
 
-function buildSystemPrompt({ brandConfig, blogSkill, brandProfile, pastSlugs, internalLinks, mode }) {
-  const isFallback = mode === 'fallback';
-  const slugsBlock = isFallback ? limitLines(pastSlugs, 3) : pastSlugs;
-  const linksBlock = isFallback ? limitLines(internalLinks, 2) : internalLinks;
-  const brandProfileBlock = isFallback ? limitLines(brandProfile, 8) : brandProfile;
-  const compactRules = isFallback
-    ? `Keep the output concise but complete. Use a specific SEO title, 1000-1600 words, no YAML front matter, no planning labels, no tool-call text, no visual brief JSON in the content.`
-    : `Write the full 1000-2500 word blog following ALL rules in the Blog Skill above.`;
-  const promptBody = isFallback ? `${brandSkillBase(blogSkill)}\n\n${brandProfileBlock}` : `${blogSkill}\n\n---\n\n## BRAND PROFILE\n${brandProfile}`;
+---
 
-  return `${promptBody}
+## BRAND PROFILE
+${brandProfile}
 
 ## CONTEXT
 - Brand: ${brandConfig.name}
@@ -141,7 +127,7 @@ Example: \`tavily_search({"query": "latest legal trends in India 2026"})\`
 1. Start by searching for recent, trending news in the ${brandConfig.name} topic domain.
 2. Pick the most timely, high-SEO-value topic from your research.
 3. Continue researching to gather citations, data, and examples.
-${compactRules}
+4. Write the full 1000-2500 word blog following ALL rules in the Blog Skill above.
 4. When done, call finish_blog() with the complete markdown body + visual brief.
 
 OUTPUT OVERRIDES:
@@ -153,39 +139,6 @@ OUTPUT OVERRIDES:
 - The title must be specific to the selected topic, never "${brandConfig.name} Insights" or generic "Insights".
 
 IMPORTANT: Wrap your tool calls in backticks and use valid JSON for arguments.`;
-}
-
-function brandSkillBase(blogSkill = '') {
-  return String(blogSkill).split('\n').slice(0, 12).join('\n');
-}
-
-function isRateLimitError(err) {
-  return err?.status === 429
-    || err?.code === 'rate_limit_exceeded'
-    || err?.error?.code === 'rate_limit_exceeded'
-    || /rate limit/i.test(err?.message || '');
-}
-
-async function createChatCompletionWithFallback(getPayloadForModel, purpose) {
-  let lastError = null;
-
-  for (const model of CONTENT_MODELS) {
-    try {
-      if (model !== PRIMARY_MODEL) {
-        const fromModel = lastError?.model || PRIMARY_MODEL;
-        console.warn(`[Blog Engine] ${purpose}: primary model hit a rate limit, falling back from ${fromModel} to ${model}`);
-      }
-      const payload = typeof getPayloadForModel === 'function'
-        ? getPayloadForModel(model)
-        : { ...getPayloadForModel, model };
-      return await groq.chat.completions.create({ ...payload, model });
-    } catch (err) {
-      lastError = err;
-      if (!isRateLimitError(err)) throw err;
-    }
-  }
-
-  throw lastError;
 }
 
 async function generateValidContent(brand, pastSlugs, internalLinks, brandConfig) {
@@ -271,16 +224,6 @@ export async function runContentAgent(brand, pastSlugs, internalLinks) {
     brandProfile,
     pastSlugs,
     internalLinks,
-    mode: 'primary',
-  });
-
-  const fallbackPrompt = buildSystemPrompt({
-    brandConfig,
-    blogSkill,
-    brandProfile,
-    pastSlugs,
-    internalLinks,
-    mode: 'fallback',
   });
 
   const messages = [
@@ -291,13 +234,14 @@ export async function runContentAgent(brand, pastSlugs, internalLinks) {
 
   // Agentic loop
   while (!blogResult) {
-    const response = await createChatCompletionWithFallback((model) => ({
-      messages: [{ role: 'system', content: model === FALLBACK_MODEL ? fallbackPrompt : systemPrompt }, ...messages],
+    const response = await groq.chat.completions.create({
+      model: PRIMARY_MODEL,
+      messages: [{ role: 'system', content: systemPrompt }, ...messages],
       // tools, // REMOVED: Using manual parsing for better stability on Groq
       // tool_choice: 'auto',
-      max_tokens: model === FALLBACK_MODEL ? 1600 : 2400,
+      max_tokens: 2400,
       temperature: 0.7,
-    }), 'Content generation');
+    });
 
     const msg = response.choices[0].message;
     messages.push(msg);
