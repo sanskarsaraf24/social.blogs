@@ -12,7 +12,7 @@ import { assembleMarkdown } from './markdownAssembler.js';
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
-const FALLBACK_MODEL = 'openai/gpt-oss-120b';
+const FALLBACK_MODEL = 'groq/compound';
 const CONTENT_MODELS = [PRIMARY_MODEL, FALLBACK_MODEL];
 const TAVILY_KEY = process.env.TAVILY_API_KEY;
 const MAX_TAVILY_CALLS = 4;
