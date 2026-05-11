@@ -2,8 +2,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import { assembleMarkdown } from './markdownAssembler.js';
 import { markPublished } from './db/blogDb.js';
-import { addPublishedLink } from './db/linksDb.js';
-import { updateSitemap } from './sitemapManager.js';
+import { addPublishedLink, removePublishedLink } from './db/linksDb.js';
+import { removeFromSitemap, updateSitemap } from './sitemapManager.js';
 
 const DEPLOY_PATHS = {
   saraf: process.env.SARAF_BLOG_PATH || '/home/sanskarsaraf.in/public_html/blog/posts',
@@ -42,4 +42,31 @@ export async function deployBlog(draft) {
   await updateSitemap(draft.brand, draft.slug);
 
   return targetPath;
+}
+
+export async function removeDeployedBlog(draft) {
+  const deployDir = DEPLOY_PATHS[draft.brand];
+  if (!deployDir) throw new Error(`No deploy path for brand: ${draft.brand}`);
+  if (!draft.slug) return { removed: false, reason: 'missing-slug' };
+
+  const filename = `${draft.slug}.md`;
+  const targetPath = path.join(deployDir, filename);
+
+  let removed = false;
+  let archivePath = null;
+  if (fs.existsSync(targetPath)) {
+    const archiveDir = path.join(path.dirname(deployDir), 'discarded-posts');
+    fs.mkdirSync(archiveDir, { recursive: true });
+
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    archivePath = path.join(archiveDir, `${draft.slug}-${stamp}.md`);
+    fs.renameSync(targetPath, archivePath);
+    removed = true;
+    console.log(`[Deployer] Archived discarded post: ${archivePath}`);
+  }
+
+  await removePublishedLink({ brand: draft.brand, slug: draft.slug });
+  await removeFromSitemap(draft.brand, draft.slug);
+
+  return { removed, archivePath, targetPath };
 }

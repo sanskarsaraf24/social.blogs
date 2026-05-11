@@ -2,13 +2,22 @@ import { getDb } from './blogDb.js';
 
 // Add a published blog URL to the internal links index
 export async function addPublishedLink({ brand, slug, title, url }) {
-  await getDb().collection('internal_links').insertOne({
+  await getDb().collection('internal_links').updateOne({
     brand,
     slug,
-    title,
-    url,
-    addedAt: new Date(),
-  });
+  }, {
+    $set: {
+      brand,
+      slug,
+      title,
+      url,
+      addedAt: new Date(),
+    },
+  }, { upsert: true });
+}
+
+export async function removePublishedLink({ brand, slug }) {
+  await getDb().collection('internal_links').deleteMany({ brand, slug });
 }
 
 // Retrieve recent internal links for a brand (for injection into new blogs)

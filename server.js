@@ -7,7 +7,7 @@ import cron from 'node-cron';
 import multer from 'multer';
 import { connectDb } from './src/db/blogDb.js';
 import { runBlogEngine, runForBrand } from './src/blogEngine.js';
-import { deployBlog } from './src/blogDeployer.js';
+import { deployBlog, removeDeployedBlog } from './src/blogDeployer.js';
 import { getDrafts, getDraft, saveDraftEdits, deleteDraft, setAutoPublish, reschedule } from './src/db/blogDb.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
@@ -139,8 +139,12 @@ blogRouter.post('/api/blog/generate', async (req, res) => {
 
 blogRouter.delete('/api/blog/draft/:id', async (req, res) => {
   try {
+    const draft = await getDraft(req.params.id);
+    if (!draft) return res.status(404).json({ error: 'Not found' });
+
+    const removal = await removeDeployedBlog(draft);
     await deleteDraft(req.params.id);
-    res.json({ ok: true });
+    res.json({ ok: true, removal });
   } catch (err) {
     res.status(500).json({ error: err.message });
   }

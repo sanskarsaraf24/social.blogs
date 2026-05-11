@@ -18,6 +18,7 @@ export async function updateSitemap(brand, slug) {
   const config = CONFIG[brand];
   if (!config) return;
 
+  try {
     let sitemap = '';
     if (fs.existsSync(config.sitemapPath)) {
       sitemap = fs.readFileSync(config.sitemapPath, 'utf8');
@@ -48,6 +49,28 @@ export async function updateSitemap(brand, slug) {
     }
   } catch (err) {
     console.error(`[Sitemap] Error updating sitemap for ${brand}:`, err.message);
+  }
+}
+
+export async function removeFromSitemap(brand, slug) {
+  const config = CONFIG[brand];
+  if (!config || !fs.existsSync(config.sitemapPath)) return false;
+
+  try {
+    const sitemap = fs.readFileSync(config.sitemapPath, 'utf8');
+    const postUrl = `${config.baseUrl}/${slug}`;
+    const escapedUrl = postUrl.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    const entryPattern = new RegExp(`\\s*<url>\\s*<loc>${escapedUrl}<\\/loc>[\\s\\S]*?<\\/url>`, 'm');
+    const nextSitemap = sitemap.replace(entryPattern, '');
+
+    if (nextSitemap === sitemap) return false;
+
+    fs.writeFileSync(config.sitemapPath, nextSitemap, 'utf8');
+    console.log(`[Sitemap] Removed ${postUrl} from ${config.sitemapPath}`);
+    return true;
+  } catch (err) {
+    console.error(`[Sitemap] Error removing sitemap entry for ${brand}:`, err.message);
+    return false;
   }
 }
 

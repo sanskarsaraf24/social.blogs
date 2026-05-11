@@ -13,7 +13,9 @@ import {
   RefreshCw,
   Image as ImageIcon,
   Save,
-  Rocket
+  Rocket,
+  Trash2,
+  X
 } from 'lucide-react';
 import { motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
@@ -69,14 +71,17 @@ export default function App() {
 
   const handleDelete = async () => {
     if (!selectedDraft) return;
-    if (!window.confirm('Are you sure you want to PERMANENTLY delete this draft?')) return;
+    const targetTitle = selectedDraft.title || selectedDraft.slug;
+    if (!window.confirm(`Discard "${targetTitle}"? If it is already published, the live blog file will be archived and removed from the site.`)) return;
     try {
       await axios.delete(`${API_BASE}/blog/draft/${selectedDraft.id}`);
-      setSelectedId(null);
+      const remainingDrafts = drafts.filter(draft => draft.id !== selectedDraft.id);
+      setDrafts(remainingDrafts);
+      setSelectedId(remainingDrafts[0]?.id ?? null);
       setSelectedDraft(null);
-      fetchDrafts();
+      await fetchDrafts();
     } catch (err) {
-      alert('Delete failed');
+      alert('Discard failed');
     }
   };
 
@@ -149,6 +154,7 @@ export default function App() {
         </div>
         <div className="header-actions">
           <button 
+            type="button"
             className="premium-btn flex items-center gap-2" 
             onClick={() => triggerGenerate()}
             disabled={generating}
@@ -157,8 +163,11 @@ export default function App() {
             Generate Blog
           </button>
           <button 
+            type="button"
             className={`secondary-btn ${settingsOpen ? 'active' : ''}`}
-            onClick={() => setSettingsOpen(!settingsOpen)}
+            onClick={() => setSettingsOpen(open => !open)}
+            aria-label="Open engine settings"
+            title="Engine settings"
           >
             <Settings size={18} />
           </button>
@@ -166,18 +175,26 @@ export default function App() {
       </header>
 
       {settingsOpen && (
-        <div className="settings-overlay glass">
-          <div className="settings-content">
-            <h3>Engine Settings</h3>
+        <div className="settings-overlay" onClick={() => setSettingsOpen(false)}>
+          <div className="settings-content" onClick={(event) => event.stopPropagation()}>
+            <div className="settings-title-row">
+              <h3>Engine Settings</h3>
+              <button type="button" className="icon-btn" onClick={() => setSettingsOpen(false)} aria-label="Close settings">
+                <X size={16} />
+              </button>
+            </div>
             <div className="setting-item">
               <label>Brand Rotation</label>
               <span>Saraf ↔ Casemate (Auto)</span>
             </div>
             <div className="setting-item">
+              <label>Word Count</label>
+              <span>1000-2500 words</span>
+            </div>
+            <div className="setting-item">
               <label>API Status</label>
               <span className="success-text">Active</span>
             </div>
-            <button className="secondary-btn w-full mt-4" onClick={() => setSettingsOpen(false)}>Close</button>
           </div>
         </div>
       )}
@@ -291,7 +308,9 @@ export default function App() {
               </div>
 
               <div className="editor-footer">
-                <button className="secondary-btn danger-hover" onClick={handleDelete}>Discard</button>
+                <button type="button" className="secondary-btn danger-hover flex items-center gap-2" onClick={handleDelete}>
+                  <Trash2 size={14} /> Discard
+                </button>
                 <div className="footer-right">
                   <button className="secondary-btn flex items-center gap-2" onClick={handleSave}>
                     <Save size={14} /> Save Draft
@@ -333,7 +352,7 @@ export default function App() {
                   <span>Word Count</span>
                   <span className="score-val">{selectedDraft.seoScore.wordCount}</span>
                 </div>
-                <p className="seo-hint">Target: 1800 - 2200 words</p>
+                <p className="seo-hint">Target: 1000 - 2500 words</p>
               </div>
 
               <div className="seo-card">
@@ -762,29 +781,50 @@ export default function App() {
         .settings-overlay {
           position: fixed;
           inset: 0;
-          background: rgba(0,0,0,0.8);
-          z-index: 200;
+          background: rgba(0,0,0,0.5);
+          z-index: 1000;
           display: flex;
-          align-items: center;
-          justify-content: center;
-          backdrop-filter: blur(8px);
+          align-items: flex-start;
+          justify-content: flex-end;
+          padding: 82px 24px 24px;
+          backdrop-filter: blur(6px);
         }
 
         .settings-content {
           background: var(--bg-secondary);
-          padding: 40px;
+          padding: 24px;
           border: 1px solid var(--accent-gold);
-          width: 400px;
+          width: min(420px, calc(100vw - 48px));
           display: flex;
           flex-direction: column;
-          gap: 24px;
+          gap: 18px;
+          box-shadow: 0 24px 80px rgba(0, 0, 0, 0.45);
         }
 
         .settings-content h3 {
           text-transform: uppercase;
           letter-spacing: 2px;
           font-size: 1rem;
-          margin-bottom: 8px;
+          margin: 0;
+        }
+
+        .settings-title-row {
+          display: flex;
+          align-items: center;
+          justify-content: space-between;
+          gap: 16px;
+        }
+
+        .icon-btn {
+          width: 36px;
+          height: 36px;
+          display: inline-flex;
+          align-items: center;
+          justify-content: center;
+          border: 1px solid var(--border-color);
+          background: var(--bg-tertiary);
+          color: var(--text-primary);
+          cursor: pointer;
         }
 
         .setting-item {

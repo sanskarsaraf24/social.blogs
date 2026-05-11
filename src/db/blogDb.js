@@ -43,7 +43,11 @@ export async function getDraft(id) {
 }
 
 export async function saveDraft(draft) {
-  await getDb().collection('blog_drafts').insertOne(draft);
+  await getDb().collection('blog_drafts').replaceOne(
+    { id: draft.id },
+    draft,
+    { upsert: true }
+  );
 }
 
 export async function saveDraftEdits(id, updates) {
