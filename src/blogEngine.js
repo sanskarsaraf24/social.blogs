@@ -98,6 +98,67 @@ function hasGeneratedArtifacts(content = '') {
   return /<function=|\b(?:tavily_search|finish_blog)\s*\(|Next,\s+I\s+will\s+search|Visual Brief|OPENING HOOK|PROBLEM FRAMING|CORE BODY|FAQ SECTION/i.test(content);
 }
 
+function limitLines(text = '', maxLines = 8) {
+  return String(text)
+    .split('\n')
+    .filter(Boolean)
+    .slice(0, maxLines)
+    .join('\n');
+}
+
+function buildSystemPrompt({ brandConfig, blogSkill, brandProfile, pastSlugs, internalLinks, mode }) {
+  const isFallback = mode === 'fallback';
+  const slugsBlock = isFallback ? limitLines(pastSlugs, 3) : pastSlugs;
+  const linksBlock = isFallback ? limitLines(internalLinks, 2) : internalLinks;
+  const brandProfileBlock = isFallback ? limitLines(brandProfile, 8) : brandProfile;
+  const compactRules = isFallback
+    ? `Keep the output concise but complete. Use a specific SEO title, 1000-1600 words, no YAML front matter, no planning labels, no tool-call text, no visual brief JSON in the content.`
+    : `Write the full 1000-2500 word blog following ALL rules in the Blog Skill above.`;
+  const promptBody = isFallback ? `${brandSkillBase(blogSkill)}\n\n${brandProfileBlock}` : `${blogSkill}\n\n---\n\n## BRAND PROFILE\n${brandProfile}`;
+
+  return `${promptBody}
+
+## CONTEXT
+- Brand: ${brandConfig.name}
+- Today's Date: ${new Date().toISOString().split('T')[0]}
+- Author: ${brandConfig.author}
+- Canonical Base URL: ${brandConfig.canonicalBase}
+
+## PAST PUBLISHED SLUGS (DO NOT REPEAT THESE TOPICS)
+${slugsBlock || 'None yet — this is the first blog.'}
+
+## AVAILABLE INTERNAL LINKS (use 2-3 of these in your blog body where relevant)
+${linksBlock || 'None yet — first blog, skip internal links.'}
+
+## YOUR TOOLS
+You MUST use these tools to perform research and submit your work. Use the following EXACT syntax for tool calls:
+- \`tavily_search({"query": "..."})\`: To search the web.
+- \`finish_blog({"content": "...", "visual_brief": {...}})\`: To submit your final blog.
+
+Example: \`tavily_search({"query": "latest legal trends in India 2026"})\`
+
+## INSTRUCTIONS
+1. Start by searching for recent, trending news in the ${brandConfig.name} topic domain.
+2. Pick the most timely, high-SEO-value topic from your research.
+3. Continue researching to gather citations, data, and examples.
+${compactRules}
+4. When done, call finish_blog() with the complete markdown body + visual brief.
+
+OUTPUT OVERRIDES:
+- content MUST start with exactly one H1: "# Specific, SEO-friendly title".
+- Do NOT include YAML front matter; the app assembles it.
+- Do NOT include "OPENING HOOK", "PROBLEM FRAMING", "CORE BODY", "FAQ SECTION", "CONCLUSION", or similar planning labels.
+- Do NOT include Visual Brief JSON inside the content. Put visual_brief only in the finish_blog argument.
+- Do NOT include tool calls, function tags, research notes, or "Next, I will search..." in the final content.
+- The title must be specific to the selected topic, never "${brandConfig.name} Insights" or generic "Insights".
+
+IMPORTANT: Wrap your tool calls in backticks and use valid JSON for arguments.`;
+}
+
+function brandSkillBase(blogSkill = '') {
+  return String(blogSkill).split('\n').slice(0, 12).join('\n');
+}
+
 function isRateLimitError(err) {
   return err?.status === 429
     || err?.code === 'rate_limit_exceeded'
@@ -105,7 +166,7 @@ function isRateLimitError(err) {
     || /rate limit/i.test(err?.message || '');
 }
 
-async function createChatCompletionWithFallback(payload, purpose) {
+async function createChatCompletionWithFallback(getPayloadForModel, purpose) {
   let lastError = null;
 
   for (const model of CONTENT_MODELS) {
@@ -114,6 +175,9 @@ async function createChatCompletionWithFallback(payload, purpose) {
         const fromModel = lastError?.model || PRIMARY_MODEL;
         console.warn(`[Blog Engine] ${purpose}: primary model hit a rate limit, falling back from ${fromModel} to ${model}`);
       }
+      const payload = typeof getPayloadForModel === 'function'
+        ? getPayloadForModel(model)
+        : { ...getPayloadForModel, model };
       return await groq.chat.completions.create({ ...payload, model });
     } catch (err) {
       lastError = err;
@@ -201,48 +265,23 @@ export async function runContentAgent(brand, pastSlugs, internalLinks) {
     },
   ];
 
-  const systemPrompt = `${blogSkill}
+  const systemPrompt = buildSystemPrompt({
+    brandConfig,
+    blogSkill,
+    brandProfile,
+    pastSlugs,
+    internalLinks,
+    mode: 'primary',
+  });
 
----
-
-## BRAND PROFILE
-${brandProfile}
-
-## CONTEXT
-- Brand: ${brandConfig.name}
-- Today's Date: ${new Date().toISOString().split('T')[0]}
-- Author: ${brandConfig.author}
-- Canonical Base URL: ${brandConfig.canonicalBase}
-
-## PAST PUBLISHED SLUGS (DO NOT REPEAT THESE TOPICS)
-${pastSlugs || 'None yet — this is the first blog.'}
-
-## AVAILABLE INTERNAL LINKS (use 2-3 of these in your blog body where relevant)
-${internalLinks || 'None yet — first blog, skip internal links.'}
-
-## YOUR TOOLS
-You MUST use these tools to perform research and submit your work. Use the following EXACT syntax for tool calls:
-- \`tavily_search({"query": "..."})\`: To search the web.
-- \`finish_blog({"content": "...", "visual_brief": {...}})\`: To submit your final blog.
-
-Example: \`tavily_search({"query": "latest legal trends in India 2026"})\`
-
-## INSTRUCTIONS
-1. Start by searching for recent, trending news in the ${brandConfig.name} topic domain.
-2. Pick the most timely, high-SEO-value topic from your research.
-3. Continue researching to gather citations, data, and examples.
-4. Write the full 1000-2500 word blog following ALL rules in the Blog Skill above.
-5. When done, call finish_blog() with the complete markdown body + visual brief.
-
-OUTPUT OVERRIDES:
-- content MUST start with exactly one H1: "# Specific, SEO-friendly title".
-- Do NOT include YAML front matter; the app assembles it.
-- Do NOT include "OPENING HOOK", "PROBLEM FRAMING", "CORE BODY", "FAQ SECTION", "CONCLUSION", or similar planning labels.
-- Do NOT include Visual Brief JSON inside the content. Put visual_brief only in the finish_blog argument.
-- Do NOT include tool calls, function tags, research notes, or "Next, I will search..." in the final content.
-- The title must be specific to the selected topic, never "${brandConfig.name} Insights" or generic "Insights".
-
-IMPORTANT: Wrap your tool calls in backticks and use valid JSON for arguments.`;
+  const fallbackPrompt = buildSystemPrompt({
+    brandConfig,
+    blogSkill,
+    brandProfile,
+    pastSlugs,
+    internalLinks,
+    mode: 'fallback',
+  });
 
   const messages = [
     { role: 'user', content: `Research and write today's blog for ${brandConfig.name}. Start by searching for what's trending.` }
@@ -252,13 +291,13 @@ IMPORTANT: Wrap your tool calls in backticks and use valid JSON for arguments.`;
 
   // Agentic loop
   while (!blogResult) {
-    const response = await createChatCompletionWithFallback({
-      messages: [{ role: 'system', content: systemPrompt }, ...messages],
+    const response = await createChatCompletionWithFallback((model) => ({
+      messages: [{ role: 'system', content: model === FALLBACK_MODEL ? fallbackPrompt : systemPrompt }, ...messages],
       // tools, // REMOVED: Using manual parsing for better stability on Groq
       // tool_choice: 'auto',
-      max_tokens: 4000,
+      max_tokens: model === FALLBACK_MODEL ? 1600 : 2400,
       temperature: 0.7,
-    }, 'Content generation');
+    }), 'Content generation');
 
     const msg = response.choices[0].message;
     messages.push(msg);
@@ -292,9 +331,9 @@ IMPORTANT: Wrap your tool calls in backticks and use valid JSON for arguments.`;
         const leakedToolText = /<function=|\b(?:tavily_search|finish_blog)\s*\(|Next,\s+I\s+will\s+search/i.test(msg.content || '');
         if (!leakedToolText && countWords(msg.content) >= MIN_WORD_COUNT) {
            console.warn('[Content Agent] No tool call found in long message — assuming completion.');
-           blogResult = { content: stripGeneratedArtifacts(msg.content), visual_brief: { archetype_hint: 'B', kicker: 'Insights', visual_brief: 'Topic-specific editorial', dominant_mood: 'editorial' } };
-           break;
-        }
+        blogResult = { content: stripGeneratedArtifacts(msg.content), visual_brief: { archetype_hint: 'B', kicker: 'Insights', visual_brief: 'Topic-specific editorial', dominant_mood: 'editorial' } };
+        break;
+      }
         // Otherwise, keep going or push a nudge
         messages.push({ role: 'user', content: 'Please proceed with a tool call (tavily_search or finish_blog) to continue.' });
         continue;
