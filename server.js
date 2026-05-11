@@ -13,6 +13,7 @@ import { getDrafts, getDraft, saveDraftEdits, deleteDraft, setAutoPublish, resch
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const app = express();
 const PORT = process.env.PORT || 3300;
+const SALES_DIST_DIR = process.env.SALES_WEB_PATH || '/home/social.minpay.in/public_html/sales';
 
 app.use(cors());
 app.use(express.json({ limit: '10mb' }));
@@ -28,10 +29,13 @@ const upload = multer({
 
 // ── Blog Router ───────────────────────────────────────────────────────────────
 const blogRouter = express.Router();
+const salesRouter = express.Router();
 
 // 1. Static Assets & Uploads
 blogRouter.use('/uploads', express.static(path.join(__dirname, 'uploads')));
 blogRouter.use(express.static(path.join(__dirname, 'frontend/dist')));
+
+salesRouter.use(express.static(SALES_DIST_DIR));
 
 // 2. API Routes
 blogRouter.get('/api/blog/drafts', async (req, res) => {
@@ -155,7 +159,12 @@ blogRouter.get('*', (req, res) => {
   res.sendFile(path.join(__dirname, 'frontend/dist/index.html'));
 });
 
+salesRouter.get('*', (req, res) => {
+  res.sendFile(path.join(SALES_DIST_DIR, 'index.html'));
+});
+
 // Mount the entire Blog Engine under /blog
+app.use('/sales', salesRouter);
 app.use('/blog', blogRouter);
 
 // ── Cron Jobs ─────────────────────────────────────────────────────────────────
