@@ -1,10 +1,9 @@
-import React, { useState, useEffect } from 'react';
+import { useState, useEffect } from 'react';
 import axios from 'axios';
 import { 
   LayoutDashboard, 
   PlusCircle, 
   Settings, 
-  ChevronRight, 
   Eye, 
   Edit3, 
   Calendar, 
@@ -16,7 +15,7 @@ import {
   Save,
   Rocket
 } from 'lucide-react';
-import { motion, AnimatePresence } from 'framer-motion';
+import { motion } from 'framer-motion';
 import ReactMarkdown from 'react-markdown';
 
 // --- Types ---
@@ -37,7 +36,7 @@ interface Draft {
   };
 }
 
-const API_BASE = 'http://localhost:3300/api';
+const API_BASE = '/blog/api';
 
 export default function App() {
   const [drafts, setDrafts] = useState<Draft[]>([]);
@@ -47,18 +46,37 @@ export default function App() {
   const [generating, setGenerating] = useState(false);
   const [activeTab, setActiveTab] = useState<'editor' | 'preview'>('editor');
 
+  const [settingsOpen, setSettingsOpen] = useState(false);
+
   // Load drafts
   const fetchDrafts = async () => {
     try {
       const res = await axios.get(`${API_BASE}/blog/drafts`);
       setDrafts(res.data.drafts);
+      // Auto-select first one if none selected
       if (res.data.drafts.length > 0 && !selectedId) {
         setSelectedId(res.data.drafts[0].id);
+      } else if (res.data.drafts.length === 0) {
+        setSelectedId(null);
+        setSelectedDraft(null);
       }
     } catch (err) {
       console.error('Failed to fetch drafts', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleDelete = async () => {
+    if (!selectedDraft) return;
+    if (!window.confirm('Are you sure you want to PERMANENTLY delete this draft?')) return;
+    try {
+      await axios.delete(`${API_BASE}/blog/draft/${selectedDraft.id}`);
+      setSelectedId(null);
+      setSelectedDraft(null);
+      fetchDrafts();
+    } catch (err) {
+      alert('Delete failed');
     }
   };
 
@@ -138,9 +156,31 @@ export default function App() {
             {generating ? <Loader2 className="animate-spin" size={14} /> : <PlusCircle size={14} />}
             Generate Blog
           </button>
-          <button className="secondary-btn"><Settings size={18} /></button>
+          <button 
+            className={`secondary-btn ${settingsOpen ? 'active' : ''}`}
+            onClick={() => setSettingsOpen(!settingsOpen)}
+          >
+            <Settings size={18} />
+          </button>
         </div>
       </header>
+
+      {settingsOpen && (
+        <div className="settings-overlay glass">
+          <div className="settings-content">
+            <h3>Engine Settings</h3>
+            <div className="setting-item">
+              <label>Brand Rotation</label>
+              <span>Saraf ↔ Casemate (Auto)</span>
+            </div>
+            <div className="setting-item">
+              <label>API Status</label>
+              <span className="success-text">Active</span>
+            </div>
+            <button className="secondary-btn w-full mt-4" onClick={() => setSettingsOpen(false)}>Close</button>
+          </div>
+        </div>
+      )}
 
       <main className="dashboard-grid">
         {/* --- Column 1: Queue Sidebar --- */}
@@ -182,10 +222,40 @@ export default function App() {
               <div className="header-preview-area">
                 <img src={selectedDraft.imageUrl} alt="Header Preview" className="header-img-preview" />
                 <div className="img-actions">
-                  <button className="secondary-btn flex items-center gap-2">
+                  <label className="secondary-btn flex items-center gap-2 cursor-pointer">
                     <ImageIcon size={14} /> Replace
-                  </button>
-                  <button className="secondary-btn flex items-center gap-2">
+                    <input 
+                      type="file" 
+                      className="hidden" 
+                      accept="image/*"
+                      onChange={async (e) => {
+                        const file = e.target.files?.[0];
+                        if (!file) return;
+                        const formData = new FormData();
+                        formData.append('image', file);
+                        try {
+                          const res = await axios.post(`${API_BASE}/blog/draft/${selectedDraft.id}/replace-image`, formData);
+                          setSelectedDraft({ ...selectedDraft, imageUrl: res.data.imageUrl });
+                          fetchDrafts();
+                        } catch (err) {
+                          alert('Failed to upload image');
+                        }
+                      }}
+                    />
+                  </label>
+                  <button 
+                    className="secondary-btn flex items-center gap-2"
+                    onClick={async () => {
+                      if (!window.confirm('Regenerate header image using AI?')) return;
+                      try {
+                        const res = await axios.post(`${API_BASE}/blog/draft/${selectedDraft.id}/regenerate-image`);
+                        setSelectedDraft({ ...selectedDraft, imageUrl: res.data.imageUrl });
+                        fetchDrafts();
+                      } catch (err) {
+                        alert('Regeneration failed');
+                      }
+                    }}
+                  >
                     <RefreshCw size={14} /> Regenerate
                   </button>
                 </div>
@@ -221,7 +291,7 @@ export default function App() {
               </div>
 
               <div className="editor-footer">
-                <button className="secondary-btn" onClick={() => setSelectedId(null)}>Discard</button>
+                <button className="secondary-btn danger-hover" onClick={handleDelete}>Discard</button>
                 <div className="footer-right">
                   <button className="secondary-btn flex items-center gap-2" onClick={handleSave}>
                     <Save size={14} /> Save Draft
@@ -686,6 +756,47 @@ export default function App() {
         }
 
         .gold-text { color: var(--accent-gold); }
+        .danger-hover:hover { color: #ef4444; border-color: #ef4444; }
+        .success-text { color: var(--success); font-weight: 600; }
+        
+        .settings-overlay {
+          position: fixed;
+          inset: 0;
+          background: rgba(0,0,0,0.8);
+          z-index: 200;
+          display: flex;
+          align-items: center;
+          justify-content: center;
+          backdrop-filter: blur(8px);
+        }
+
+        .settings-content {
+          background: var(--bg-secondary);
+          padding: 40px;
+          border: 1px solid var(--accent-gold);
+          width: 400px;
+          display: flex;
+          flex-direction: column;
+          gap: 24px;
+        }
+
+        .settings-content h3 {
+          text-transform: uppercase;
+          letter-spacing: 2px;
+          font-size: 1rem;
+          margin-bottom: 8px;
+        }
+
+        .setting-item {
+          display: flex;
+          justify-content: space-between;
+          font-size: 0.875rem;
+          padding-bottom: 12px;
+          border-bottom: 1px solid var(--border-color);
+        }
+
+        .setting-item label { color: var(--text-muted); }
+
         .loading-screen {
           height: 100vh;
           display: flex;

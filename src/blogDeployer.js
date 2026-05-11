@@ -3,6 +3,7 @@ import path from 'node:path';
 import { assembleMarkdown } from './markdownAssembler.js';
 import { markPublished } from './db/blogDb.js';
 import { addPublishedLink } from './db/linksDb.js';
+import { updateSitemap } from './sitemapManager.js';
 
 const DEPLOY_PATHS = {
   saraf: process.env.SARAF_BLOG_PATH || '/home/sanskarsaraf.in/public_html/blog/posts',
@@ -21,6 +22,7 @@ export async function deployBlog(draft) {
   const markdown = assembleMarkdown(draft);
 
   fs.writeFileSync(targetPath, markdown, 'utf8');
+  fs.chmodSync(targetPath, 0o644); // Ensure world-readable for PHP
   console.log(`[Deployer] ✅ Published: ${targetPath}`);
 
   // Update MongoDB status
@@ -35,5 +37,9 @@ export async function deployBlog(draft) {
   });
 
   console.log(`[Deployer] Internal links index updated for ${draft.brand}`);
+
+  // Update Sitemap
+  await updateSitemap(draft.brand, draft.slug);
+
   return targetPath;
 }

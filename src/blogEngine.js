@@ -1,3 +1,4 @@
+import 'dotenv/config';
 import Groq from 'groq-sdk';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -12,7 +13,8 @@ const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const groq = new Groq({ apiKey: process.env.GROQ_API_KEY });
 const MODEL = 'llama-3.3-70b-versatile';
 const TAVILY_KEY = process.env.TAVILY_API_KEY;
-const MAX_TAVILY_CALLS = 6;
+const MAX_TAVILY_CALLS = 4;
+const MIN_WORD_COUNT = 1000;
 
 // ── Brand config ──────────────────────────────────────────────────────────────
 const BRANDS = {
@@ -62,6 +64,64 @@ function loadSkill(filename) {
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
 }
 
+function stripGeneratedArtifacts(content = '') {
+  let cleaned = String(content).replace(/\r\n/g, '\n').trim();
+  cleaned = cleaned.replace(/^---[\s\S]*?\n---\s*/m, '');
+  cleaned = cleaned.replace(/<function=\w+>\s*[\s\S]*?<\/function>/g, '');
+  cleaned = cleaned.replace(/`?\b(?:tavily_search|finish_blog)\s*\([\s\S]*?\)`?/g, '');
+  cleaned = cleaned.replace(/^#{1,6}\s*(OPENING HOOK|PROBLEM FRAMING|CORE BODY|REAL-WORLD EXAMPLE|FAQ SECTION|CONCLUSION)\s*$/gim, '');
+  cleaned = cleaned.replace(/\n{2,}#{1,6}\s*Visual Brief[\s\S]*$/i, '');
+  cleaned = cleaned.replace(/\n{2,}```json\s*\{[\s\S]*?archetype_hint[\s\S]*?```\s*$/i, '');
+  cleaned = cleaned.replace(/\n{3,}/g, '\n\n').trim();
+  return cleaned;
+}
+
+function countWords(content = '') {
+  return stripGeneratedArtifacts(content)
+    .replace(/^#{1,6}\s+/gm, '')
+    .split(/\s+/)
+    .filter(Boolean).length;
+}
+
+function extractTitle(content = '', brandConfig) {
+  const titleMatch = content.match(/^#\s+(.+)$/m);
+  return titleMatch ? titleMatch[1].trim() : `${brandConfig.name} Insights`;
+}
+
+function isGenericTitle(title = '') {
+  return /^(saraf\s*&?\s*co|case\s*mate|casemate)?\s*insights$/i.test(title.trim());
+}
+
+function hasGeneratedArtifacts(content = '') {
+  return /<function=|\b(?:tavily_search|finish_blog)\s*\(|Next,\s+I\s+will\s+search|Visual Brief|OPENING HOOK|PROBLEM FRAMING|CORE BODY|FAQ SECTION/i.test(content);
+}
+
+async function generateValidContent(brand, pastSlugs, internalLinks, brandConfig) {
+  let lastError = '';
+
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    const contentResult = await runContentAgent(brand, pastSlugs, internalLinks);
+    contentResult.content = stripGeneratedArtifacts(contentResult.content);
+
+    const wordCount = countWords(contentResult.content);
+    const title = extractTitle(contentResult.content, brandConfig);
+    const errors = [];
+
+    if (wordCount < MIN_WORD_COUNT) errors.push(`too short (${wordCount} words)`);
+    if (isGenericTitle(title)) errors.push(`generic title "${title}"`);
+    if (hasGeneratedArtifacts(contentResult.content)) errors.push('contains leaked tool/scaffold text');
+
+    if (!errors.length) {
+      return { contentResult, title, wordCount };
+    }
+
+    lastError = errors.join(', ');
+    console.warn(`[Blog Engine] Content validation failed on attempt ${attempt}: ${lastError}`);
+  }
+
+  throw new Error(`Generated blog failed validation after 2 attempts: ${lastError}`);
+}
+
 // ── Content Agent (fully autonomous) ─────────────────────────────────────────
 export async function runContentAgent(brand, pastSlugs, internalLinks) {
   const brandConfig = BRANDS[brand];
@@ -94,7 +154,7 @@ export async function runContentAgent(brand, pastSlugs, internalLinks) {
         parameters: {
           type: 'object',
           properties: {
-            content: { type: 'string', description: 'The complete blog in Markdown format, including YAML front matter at the top.' },
+            content: { type: 'string', description: 'The complete publishable blog body in Markdown. Start with one H1. Do not include YAML front matter, tool calls, research notes, or visual brief JSON.' },
             visual_brief: {
               type: 'object',
               description: 'Instructions for the Image Agent.',
@@ -133,15 +193,28 @@ ${pastSlugs || 'None yet — this is the first blog.'}
 ${internalLinks || 'None yet — first blog, skip internal links.'}
 
 ## YOUR TOOLS
-- \`tavily_search(query)\`: Search the web. Budget: ${MAX_TAVILY_CALLS} calls max. You decide all queries.
-- \`finish_blog(content, visual_brief)\`: Submit your completed blog. Call once when done.
+You MUST use these tools to perform research and submit your work. Use the following EXACT syntax for tool calls:
+- \`tavily_search({"query": "..."})\`: To search the web.
+- \`finish_blog({"content": "...", "visual_brief": {...}})\`: To submit your final blog.
+
+Example: \`tavily_search({"query": "latest legal trends in India 2026"})\`
 
 ## INSTRUCTIONS
 1. Start by searching for recent, trending news in the ${brandConfig.name} topic domain.
 2. Pick the most timely, high-SEO-value topic from your research.
 3. Continue researching to gather citations, data, and examples.
-4. Write the full 1800-2200 word blog following ALL rules in the Blog Skill above.
-5. When done, call finish_blog() with the complete markdown + visual brief.`;
+4. Write the full 1000-2500 word blog following ALL rules in the Blog Skill above.
+5. When done, call finish_blog() with the complete markdown body + visual brief.
+
+OUTPUT OVERRIDES:
+- content MUST start with exactly one H1: "# Specific, SEO-friendly title".
+- Do NOT include YAML front matter; the app assembles it.
+- Do NOT include "OPENING HOOK", "PROBLEM FRAMING", "CORE BODY", "FAQ SECTION", "CONCLUSION", or similar planning labels.
+- Do NOT include Visual Brief JSON inside the content. Put visual_brief only in the finish_blog argument.
+- Do NOT include tool calls, function tags, research notes, or "Next, I will search..." in the final content.
+- The title must be specific to the selected topic, never "${brandConfig.name} Insights" or generic "Insights".
+
+IMPORTANT: Wrap your tool calls in backticks and use valid JSON for arguments.`;
 
   const messages = [
     { role: 'user', content: `Research and write today's blog for ${brandConfig.name}. Start by searching for what's trending.` }
@@ -154,8 +227,8 @@ ${internalLinks || 'None yet — first blog, skip internal links.'}
     const response = await groq.chat.completions.create({
       model: MODEL,
       messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      tools,
-      tool_choice: 'auto',
+      // tools, // REMOVED: Using manual parsing for better stability on Groq
+      // tool_choice: 'auto',
       max_tokens: 4000,
       temperature: 0.7,
     });
@@ -163,11 +236,42 @@ ${internalLinks || 'None yet — first blog, skip internal links.'}
     const msg = response.choices[0].message;
     messages.push(msg);
 
+    // Fallback: Check for manual tool calls in text
     if (!msg.tool_calls || msg.tool_calls.length === 0) {
-      // Model finished without calling finish_blog — extract content from text
-      console.warn('[Content Agent] No tool call — extracting from text response.');
-      blogResult = { content: msg.content, visual_brief: { archetype_hint: 'A', kicker: 'Insights', visual_brief: 'Professional editorial clean', dominant_mood: 'serious' } };
-      break;
+      const match = msg.content?.match(/(\w+)\(([\s\S]*?)\)/);
+      if (match && (match[1] === 'tavily_search' || match[1] === 'finish_blog')) {
+        const funcName = match[1];
+        let argsStr = match[2].trim();
+        // Clean up markdown/backticks if model wrapped them
+        argsStr = argsStr.replace(/^`|`$/g, '');
+        
+        try {
+          // If it's just a string like "query", wrap it in JSON
+          if (funcName === 'tavily_search' && !argsStr.startsWith('{')) {
+             argsStr = JSON.stringify({ query: argsStr });
+          }
+          
+          msg.tool_calls = [{
+            id: `call_${Date.now()}`,
+            type: 'function',
+            function: { name: funcName, arguments: argsStr }
+          }];
+        } catch (e) {
+          console.error('[Content Agent] Failed to parse manual tool call:', argsStr);
+        }
+      }
+      
+      if (!msg.tool_calls || msg.tool_calls.length === 0) {
+        const leakedToolText = /<function=|\b(?:tavily_search|finish_blog)\s*\(|Next,\s+I\s+will\s+search/i.test(msg.content || '');
+        if (!leakedToolText && countWords(msg.content) >= MIN_WORD_COUNT) {
+           console.warn('[Content Agent] No tool call found in long message — assuming completion.');
+           blogResult = { content: stripGeneratedArtifacts(msg.content), visual_brief: { archetype_hint: 'B', kicker: 'Insights', visual_brief: 'Topic-specific editorial', dominant_mood: 'editorial' } };
+           break;
+        }
+        // Otherwise, keep going or push a nudge
+        messages.push({ role: 'user', content: 'Please proceed with a tool call (tavily_search or finish_blog) to continue.' });
+        continue;
+      }
     }
 
     for (const call of msg.tool_calls) {
@@ -175,7 +279,7 @@ ${internalLinks || 'None yet — first blog, skip internal links.'}
 
       if (call.function.name === 'tavily_search') {
         if (tavilyCallCount >= MAX_TAVILY_CALLS) {
-          messages.push({ role: 'tool', tool_call_id: call.id, content: 'BUDGET EXHAUSTED: You have used all 6 Tavily calls. You must now write the blog and call finish_blog().' });
+          messages.push({ role: 'tool', tool_call_id: call.id, content: `BUDGET EXHAUSTED: You have used all ${MAX_TAVILY_CALLS} Tavily calls. You must now write the blog and call finish_blog().` });
           continue;
         }
         tavilyCallCount++;
@@ -189,6 +293,7 @@ ${internalLinks || 'None yet — first blog, skip internal links.'}
 
       } else if (call.function.name === 'finish_blog') {
         console.log('[Content Agent] Blog received via finish_blog()');
+        args.content = stripGeneratedArtifacts(args.content);
         blogResult = args;
       }
     }
@@ -203,6 +308,7 @@ export async function runImageAgent(title, visualBrief, brand) {
   const palette = brandConfig.palette;
 
   const prompt = `You are an Art Director for a premium legal/fintech brand.
+Your goal is to create a highly relevant, cinematic header image for this blog post.
 
 BLOG TITLE: "${title}"
 VISUAL BRIEF: ${visualBrief.visual_brief}
@@ -210,35 +316,37 @@ DOMINANT MOOD: ${visualBrief.dominant_mood}
 KICKER: ${visualBrief.kicker}
 ARCHETYPE HINT: ${visualBrief.archetype_hint}
 
-BRAND PALETTE:
-- Background: ${palette.bg}
-- Accent: ${palette.accent}
-- Text: ${palette.text}
-- Secondary: ${palette.secondary}
-- Detail: ${palette.detail}
-
-Select the best archetype (A/B/C/D) for this blog header image.
-Return ONLY valid JSON with this exact structure:
+Select the best archetype (A/B/C/D/E) for this blog. Archetype E (Full-bleed AI Visual) is preferred for high-impact topics.
+Return ONLY valid JSON with this structure:
 {
-  "archetype": "A" | "B" | "C" | "D",
+  "archetype": "E",
   "kicker": "short category label",
-  "accent_override": null | "#hexcolor"
+  "accent_override": null | "#hexcolor",
+  "image_keywords": "A highly detailed, cinematic, photorealistic description for an AI image generator. Describe a scene (e.g. 'A high-end Mumbai courtroom with warm sunset light hitting wooden panels') not just keywords."
 }`;
 
   const response = await groq.chat.completions.create({
     model: MODEL,
     messages: [{ role: 'user', content: prompt }],
-    max_tokens: 200,
+    max_tokens: 300,
     temperature: 0.3,
     response_format: { type: 'json_object' },
   });
 
-  let decision = { archetype: visualBrief.archetype_hint || 'A', kicker: visualBrief.kicker || 'Insights', accent_override: null };
+  let decision = { archetype: visualBrief.archetype_hint || 'A', kicker: visualBrief.kicker || 'Insights', accent_override: null, image_keywords: 'business law premium' };
   try {
     decision = JSON.parse(response.choices[0].message.content);
   } catch { /* use default */ }
 
-  console.log(`[Image Agent] Archetype: ${decision.archetype}, Kicker: "${decision.kicker}"`);
+  console.log(`[Image Agent] Archetype: ${decision.archetype}, Kicker: "${decision.kicker}", Keywords: "${decision.image_keywords}"`);
+
+  // Build background image URL for AI-generated visual (Archetype E)
+  let bgImage = null;
+  if (decision.archetype === 'E' || decision.image_keywords) {
+    const prompt = encodeURIComponent(`Premium professional ${decision.image_keywords}, cinematic lighting, photorealistic, 8k, high contrast, clean composition, no text`);
+    bgImage = `https://image.pollinations.ai/prompt/${prompt}?width=1200&height=630&nologo=true&seed=${Date.now()}`;
+    console.log(`[Image Agent] AI Background: ${bgImage}`);
+  }
 
   const imageUrl = await renderBlogHeader({
     archetype: decision.archetype,
@@ -247,6 +355,7 @@ Return ONLY valid JSON with this exact structure:
     kicker: decision.kicker,
     palette: { ...palette, accent: decision.accent_override || palette.accent },
     logoUrl: brandConfig.logoUrl,
+    bgImage
   });
 
   return { archetype: decision.archetype, imageUrl };
@@ -261,16 +370,13 @@ export async function runForBrand(brand) {
   const internalLinks = await getInternalLinks(brand, 8);
 
   // Step 1: Content Agent (fully agentic)
-  const contentResult = await runContentAgent(brand, pastSlugs, internalLinks);
+  const { contentResult, title: rawTitle, wordCount } = await generateValidContent(brand, pastSlugs, internalLinks, brandConfig);
 
   // Step 2: 2-minute cooldown
   console.log('[Blog Engine] ⏱ Cooldown: 120 seconds...');
   await new Promise(r => setTimeout(r, 120_000));
 
   // Step 3: Extract title from content
-  const titleMatch = contentResult.content.match(/^#\s+(.+)$/m);
-  const rawTitle = titleMatch ? titleMatch[1].trim() : `${brandConfig.name} Insights`;
-
   // Step 4: Image Agent
   const imageResult = await runImageAgent(rawTitle, contentResult.visual_brief, brand);
 

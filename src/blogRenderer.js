@@ -2,18 +2,18 @@ import puppeteer from 'puppeteer';
 import path from 'node:path';
 import fs from 'node:fs';
 import { fileURLToPath } from 'node:url';
-import { archetypeA, archetypeB, archetypeC, archetypeD } from './blogTemplates.js';
+import { archetypeA, archetypeB, archetypeC, archetypeD, archetypeE } from './blogTemplates.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 const outputDir = path.join(__dirname, '..', 'uploads', 'blog-headers');
 
 if (!fs.existsSync(outputDir)) fs.mkdirSync(outputDir, { recursive: true });
 
-const ARCHETYPES = { A: archetypeA, B: archetypeB, C: archetypeC, D: archetypeD };
+const ARCHETYPES = { A: archetypeA, B: archetypeB, C: archetypeC, D: archetypeD, E: archetypeE };
 
-export async function renderBlogHeader({ archetype = 'A', brand, title, kicker, palette, logoUrl }) {
+export async function renderBlogHeader({ archetype = 'A', brand, title, kicker, palette, logoUrl, bgImage }) {
   const templateFn = ARCHETYPES[archetype] || archetypeA;
-  const html = templateFn({ title, kicker, palette, logoUrl, brand });
+  const html = templateFn({ title, kicker, palette, logoUrl, brand, bgImage });
 
   const browser = await puppeteer.launch({
     headless: 'new',

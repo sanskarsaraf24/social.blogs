@@ -4,10 +4,13 @@ let db;
 let client;
 
 export async function connectDb() {
-  client = new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017');
+  client = new MongoClient(process.env.MONGODB_URI || 'mongodb://127.0.0.1:27017', {
+    serverSelectionTimeoutMS: Number(process.env.MONGODB_CONNECT_TIMEOUT_MS || 5000),
+  });
   await client.connect();
-  db = client.db(process.env.MONGODB_DB || 'blog_automation');
-  console.log(`[DB] Connected to MongoDB: ${process.env.MONGODB_DB}`);
+  const dbName = process.env.MONGODB_DB || 'blog_automation';
+  db = client.db(dbName);
+  console.log(`[DB] Connected to MongoDB: ${dbName}`);
 
   // Create indexes for performance
   await db.collection('blog_drafts').createIndex({ brand: 1, status: 1 });
