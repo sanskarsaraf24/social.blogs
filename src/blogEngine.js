@@ -15,6 +15,11 @@ const PRIMARY_MODEL = 'llama-3.3-70b-versatile';
 const TAVILY_KEY = process.env.TAVILY_API_KEY;
 const MAX_TAVILY_CALLS = 4;
 const MIN_WORD_COUNT = 1000;
+const GENERATION_GAP_MS = 60_000;
+const MAX_PAST_SLUGS = 4;
+const MAX_INTERNAL_LINKS = 4;
+
+let activeGeneration = null;
 
 // ── Brand config ──────────────────────────────────────────────────────────────
 const BRANDS = {
@@ -64,6 +69,60 @@ function loadSkill(filename) {
   return fs.existsSync(p) ? fs.readFileSync(p, 'utf8') : '';
 }
 
+function sleep(ms) {
+  return new Promise(resolve => setTimeout(resolve, ms));
+}
+
+function isGenerationRunning() {
+  return Boolean(activeGeneration);
+}
+
+function beginGeneration(brand, trigger = 'manual') {
+  if (activeGeneration) {
+    return { ok: false, activeGeneration };
+  }
+  activeGeneration = {
+    brand,
+    trigger,
+    startedAt: new Date().toISOString(),
+  };
+  return { ok: true };
+}
+
+function endGeneration() {
+  activeGeneration = null;
+}
+
+function compactList(items = [], maxItems = 4, maxLineLength = 140) {
+  return String(items || '')
+    .split('\n')
+    .map(line => line.trim())
+    .filter(Boolean)
+    .slice(0, maxItems)
+    .map(line => line.slice(0, maxLineLength))
+    .join('\n');
+}
+
+function brandBrief(brandConfig) {
+  if (brandConfig.domain === 'saraf') {
+    return [
+      'Brand: Saraf & Co.',
+      'Tone: authoritative, practical, precise, and calm.',
+      'Audience: Indian business leaders and legal decision-makers.',
+      'Focus: corporate law, commercial disputes, regulatory changes, arbitration, and compliance.',
+      'Avoid generic intros, section labels, and filler language.'
+    ].join(' ');
+  }
+
+  return [
+    'Brand: Casemate.',
+    'Tone: institutional, source-backed, and clear.',
+    'Audience: advocates, in-house legal teams, and legal operators.',
+    'Focus: legal-tech workflows, AI for legal work, court data, research, and practice efficiency.',
+    'Avoid generic intros, section labels, and filler language.'
+  ].join(' ');
+}
+
 function stripGeneratedArtifacts(content = '') {
   let cleaned = String(content).replace(/\r\n/g, '\n').trim();
   cleaned = cleaned.replace(/^---[\s\S]*?\n---\s*/m, '');
@@ -96,68 +155,185 @@ function hasGeneratedArtifacts(content = '') {
   return /<function=|\b(?:tavily_search|finish_blog)\s*\(|Next,\s+I\s+will\s+search|Visual Brief|OPENING HOOK|PROBLEM FRAMING|CORE BODY|FAQ SECTION/i.test(content);
 }
 
-function buildSystemPrompt({ brandConfig, blogSkill, brandProfile, pastSlugs, internalLinks }) {
-  return `${blogSkill}
+function safeParseJson(raw, fallback = null) {
+  try {
+    return JSON.parse(raw);
+  } catch (firstError) {
+    const match = String(raw || '').match(/\{[\s\S]*\}/);
+    if (match) {
+      try {
+        return JSON.parse(match[0]);
+      } catch {
+        // fall through
+      }
+    }
+    if (fallback !== null) return fallback;
+    throw firstError;
+  }
+}
 
----
+function buildContextSummary(pastSlugs, internalLinks) {
+  const slugs = compactList(pastSlugs, MAX_PAST_SLUGS, 120);
+  const links = compactList(internalLinks, MAX_INTERNAL_LINKS, 120);
+  return {
+    pastSlugs: slugs || 'None yet.',
+    internalLinks: links || 'None yet.',
+  };
+}
 
-## BRAND PROFILE
-${brandProfile}
+function buildOutlinePrompt({ brandConfig, research, pastSlugs, internalLinks }) {
+  const context = buildContextSummary(pastSlugs, internalLinks);
+  return `You are writing a blog for ${brandConfig.name}.
 
-## CONTEXT
-- Brand: ${brandConfig.name}
-- Today's Date: ${new Date().toISOString().split('T')[0]}
-- Author: ${brandConfig.author}
-- Canonical Base URL: ${brandConfig.canonicalBase}
+Brand brief: ${brandBrief(brandConfig)}
+Date: ${new Date().toISOString().split('T')[0]}
+Canonical base: ${brandConfig.canonicalBase}
 
-## PAST PUBLISHED SLUGS (DO NOT REPEAT THESE TOPICS)
-${slugsBlock || 'None yet — this is the first blog.'}
+Past slugs:
+${context.pastSlugs}
 
-## AVAILABLE INTERNAL LINKS (use 2-3 of these in your blog body where relevant)
-${linksBlock || 'None yet — first blog, skip internal links.'}
+Internal links:
+${context.internalLinks}
 
-## YOUR TOOLS
-You MUST use these tools to perform research and submit your work. Use the following EXACT syntax for tool calls:
-- \`tavily_search({"query": "..."})\`: To search the web.
-- \`finish_blog({"content": "...", "visual_brief": {...}})\`: To submit your final blog.
+Research notes:
+${research}
 
-Example: \`tavily_search({"query": "latest legal trends in India 2026"})\`
+Return ONLY valid JSON with these keys:
+{
+  "title": "specific SEO-friendly title",
+  "angle": "1 short sentence on the core angle",
+  "target_word_count": 1200,
+  "outline": ["section 1", "section 2", "section 3", "section 4", "section 5"],
+  "visual_brief": {
+    "visual_brief": "3 to 5 words",
+    "archetype_hint": "A",
+    "dominant_mood": "serious",
+    "kicker": "short category label"
+  }
+}
 
-## INSTRUCTIONS
-1. Start by searching for recent, trending news in the ${brandConfig.name} topic domain.
-2. Pick the most timely, high-SEO-value topic from your research.
-3. Continue researching to gather citations, data, and examples.
-4. Write the full 1000-2500 word blog following ALL rules in the Blog Skill above.
-4. When done, call finish_blog() with the complete markdown body + visual brief.
+Rules:
+- Do not use generic titles like "${brandConfig.name} Insights".
+- Do not include markdown.
+- Do not include section labels like OPENING HOOK or PROBLEM FRAMING.`;
+}
 
-OUTPUT OVERRIDES:
-- content MUST start with exactly one H1: "# Specific, SEO-friendly title".
-- Do NOT include YAML front matter; the app assembles it.
-- Do NOT include "OPENING HOOK", "PROBLEM FRAMING", "CORE BODY", "FAQ SECTION", "CONCLUSION", or similar planning labels.
-- Do NOT include Visual Brief JSON inside the content. Put visual_brief only in the finish_blog argument.
-- Do NOT include tool calls, function tags, research notes, or "Next, I will search..." in the final content.
-- The title must be specific to the selected topic, never "${brandConfig.name} Insights" or generic "Insights".
+function buildWritingPrompt({ brandConfig, outline, research, pastSlugs, internalLinks }) {
+  const context = buildContextSummary(pastSlugs, internalLinks);
+  const sections = Array.isArray(outline?.outline) ? outline.outline.join('\n- ') : '';
+  return `Write the final blog for ${brandConfig.name}.
 
-IMPORTANT: Wrap your tool calls in backticks and use valid JSON for arguments.`;
+Brand brief: ${brandBrief(brandConfig)}
+Title: ${outline.title}
+Angle: ${outline.angle}
+Target length: ${outline.target_word_count || 1200} words
+
+Research notes:
+${research}
+
+Outline:
+- ${sections}
+
+Past slugs to avoid:
+${context.pastSlugs}
+
+Internal links to weave in naturally where relevant:
+${context.internalLinks}
+
+Rules:
+- Start with exactly one H1 using the title above.
+- Write 1000-2500 words.
+- Do not include YAML front matter.
+- Do not include "OPENING HOOK", "PROBLEM FRAMING", "CORE BODY", "FAQ SECTION", "CONCLUSION", or any outline labels.
+- Do not include visual brief JSON, tool notes, or research notes.
+- Keep the language specific, practical, and publication-ready.`;
+}
+
+async function runOutlineAgent(brand, pastSlugs, internalLinks, brandConfig) {
+  const queries = brand === 'saraf'
+    ? [
+        'recent Indian corporate law developments 2026',
+        'commercial disputes arbitration regulatory compliance India 2026'
+      ]
+    : [
+        'recent legal technology trends India 2026',
+        'AI in legal research and workflow automation India 2026'
+      ];
+
+  const researchBlocks = [];
+  for (const query of queries) {
+    researchBlocks.push(await tavilySearch(query));
+  }
+
+  const outlinePrompt = buildOutlinePrompt({
+    brandConfig,
+    research: researchBlocks.map(block => block.slice(0, 1800)).join('\n\n---\n\n'),
+    pastSlugs,
+    internalLinks,
+  });
+
+  const completion = await groq.chat.completions.create({
+    model: PRIMARY_MODEL,
+    messages: [{ role: 'system', content: 'Return compact JSON only.' }, { role: 'user', content: outlinePrompt }],
+    max_tokens: 900,
+    temperature: 0.4,
+    response_format: { type: 'json_object' },
+  });
+
+  const raw = completion.choices[0].message.content || '{}';
+  return {
+    outline: safeParseJson(raw, {
+      title: `${brandConfig.name} Insights`,
+      angle: 'Practical update',
+      target_word_count: 1200,
+      outline: ['Introduction', 'Key developments', 'Practical impact', 'What to watch', 'Conclusion'],
+      visual_brief: { visual_brief: 'Editorial clarity', archetype_hint: 'B', dominant_mood: 'editorial', kicker: 'Insights' },
+    }),
+    research: researchBlocks.map(block => block.slice(0, 1800)).join('\n\n---\n\n'),
+  };
+}
+
+async function runWritingAgent(brand, outline, research, pastSlugs, internalLinks, brandConfig) {
+  const writingPrompt = buildWritingPrompt({
+    brandConfig,
+    outline,
+    research: research.slice(0, 2400),
+    pastSlugs,
+    internalLinks,
+  });
+
+  const completion = await groq.chat.completions.create({
+    model: PRIMARY_MODEL,
+    messages: [{ role: 'system', content: 'Write the full blog in markdown only.' }, { role: 'user', content: writingPrompt }],
+    max_tokens: 2400,
+    temperature: 0.7,
+  });
+
+  return stripGeneratedArtifacts(completion.choices[0].message.content || '');
 }
 
 async function generateValidContent(brand, pastSlugs, internalLinks, brandConfig) {
   let lastError = '';
 
   for (let attempt = 1; attempt <= 2; attempt++) {
-    const contentResult = await runContentAgent(brand, pastSlugs, internalLinks);
-    contentResult.content = stripGeneratedArtifacts(contentResult.content);
+    const { outline, research } = await runOutlineAgent(brand, pastSlugs, internalLinks, brandConfig);
+    await sleep(GENERATION_GAP_MS);
+    const content = await runWritingAgent(brand, outline, research, pastSlugs, internalLinks, brandConfig);
 
-    const wordCount = countWords(contentResult.content);
-    const title = extractTitle(contentResult.content, brandConfig);
+    const wordCount = countWords(content);
+    const title = outline.title || extractTitle(content, brandConfig);
     const errors = [];
 
     if (wordCount < MIN_WORD_COUNT) errors.push(`too short (${wordCount} words)`);
     if (isGenericTitle(title)) errors.push(`generic title "${title}"`);
-    if (hasGeneratedArtifacts(contentResult.content)) errors.push('contains leaked tool/scaffold text');
+    if (hasGeneratedArtifacts(content)) errors.push('contains leaked tool/scaffold text');
 
     if (!errors.length) {
-      return { contentResult, title, wordCount };
+      return {
+        contentResult: { content, visual_brief: outline.visual_brief || { visual_brief: 'Editorial clarity', archetype_hint: 'B', dominant_mood: 'editorial', kicker: 'Insights' } },
+        title,
+        wordCount,
+      };
     }
 
     lastError = errors.join(', ');
@@ -167,149 +343,15 @@ async function generateValidContent(brand, pastSlugs, internalLinks, brandConfig
   throw new Error(`Generated blog failed validation after 2 attempts: ${lastError}`);
 }
 
-// ── Content Agent (fully autonomous) ─────────────────────────────────────────
 export async function runContentAgent(brand, pastSlugs, internalLinks) {
   const brandConfig = BRANDS[brand];
-  const blogSkill = loadSkill('BlogWriterSkill.md');
-  const brandProfile = loadSkill(`${brand === 'saraf' ? 'Saraf' : 'Casemate'}BrandProfile.md`);
-
-  let tavilyCallCount = 0;
-  let blogResult = null;
-
-  const tools = [
-    {
-      type: 'function',
-      function: {
-        name: 'tavily_search',
-        description: `Search the web for real-time information. You may call this up to ${MAX_TAVILY_CALLS} times. Use it to find trending topics, court judgments, statistics, and expert commentary. Budget remaining will be shown after each call.`,
-        parameters: {
-          type: 'object',
-          properties: {
-            query: { type: 'string', description: 'Specific, targeted search query.' },
-          },
-          required: ['query'],
-        },
-      },
-    },
-    {
-      type: 'function',
-      function: {
-        name: 'finish_blog',
-        description: 'Submit the completed blog when you have finished writing it. Call this ONLY once, when the full blog is ready.',
-        parameters: {
-          type: 'object',
-          properties: {
-            content: { type: 'string', description: 'The complete publishable blog body in Markdown. Start with one H1. Do not include YAML front matter, tool calls, research notes, or visual brief JSON.' },
-            visual_brief: {
-              type: 'object',
-              description: 'Instructions for the Image Agent.',
-              properties: {
-                visual_brief: { type: 'string', description: '3-word vibe (e.g. "Architectural authority quiet")' },
-                archetype_hint: { type: 'string', enum: ['A', 'B', 'C', 'D'] },
-                dominant_mood: { type: 'string', enum: ['serious', 'technical', 'editorial', 'comparative'] },
-                kicker: { type: 'string', description: 'Category label (e.g. "Commercial Law")' },
-              },
-              required: ['visual_brief', 'archetype_hint', 'dominant_mood', 'kicker'],
-            },
-          },
-          required: ['content', 'visual_brief'],
-        },
-      },
-    },
-  ];
-
-  const systemPrompt = buildSystemPrompt({
-    brandConfig,
-    blogSkill,
-    brandProfile,
-    pastSlugs,
-    internalLinks,
-  });
-
-  const messages = [
-    { role: 'user', content: `Research and write today's blog for ${brandConfig.name}. Start by searching for what's trending.` }
-  ];
-
-  console.log(`[Content Agent] Starting agentic run for ${brandConfig.name}...`);
-
-  // Agentic loop
-  while (!blogResult) {
-    const response = await groq.chat.completions.create({
-      model: PRIMARY_MODEL,
-      messages: [{ role: 'system', content: systemPrompt }, ...messages],
-      // tools, // REMOVED: Using manual parsing for better stability on Groq
-      // tool_choice: 'auto',
-      max_tokens: 2400,
-      temperature: 0.7,
-    });
-
-    const msg = response.choices[0].message;
-    messages.push(msg);
-
-    // Fallback: Check for manual tool calls in text
-    if (!msg.tool_calls || msg.tool_calls.length === 0) {
-      const match = msg.content?.match(/(\w+)\(([\s\S]*?)\)/);
-      if (match && (match[1] === 'tavily_search' || match[1] === 'finish_blog')) {
-        const funcName = match[1];
-        let argsStr = match[2].trim();
-        // Clean up markdown/backticks if model wrapped them
-        argsStr = argsStr.replace(/^`|`$/g, '');
-        
-        try {
-          // If it's just a string like "query", wrap it in JSON
-          if (funcName === 'tavily_search' && !argsStr.startsWith('{')) {
-             argsStr = JSON.stringify({ query: argsStr });
-          }
-          
-          msg.tool_calls = [{
-            id: `call_${Date.now()}`,
-            type: 'function',
-            function: { name: funcName, arguments: argsStr }
-          }];
-        } catch (e) {
-          console.error('[Content Agent] Failed to parse manual tool call:', argsStr);
-        }
-      }
-      
-      if (!msg.tool_calls || msg.tool_calls.length === 0) {
-        const leakedToolText = /<function=|\b(?:tavily_search|finish_blog)\s*\(|Next,\s+I\s+will\s+search/i.test(msg.content || '');
-        if (!leakedToolText && countWords(msg.content) >= MIN_WORD_COUNT) {
-           console.warn('[Content Agent] No tool call found in long message — assuming completion.');
-        blogResult = { content: stripGeneratedArtifacts(msg.content), visual_brief: { archetype_hint: 'B', kicker: 'Insights', visual_brief: 'Topic-specific editorial', dominant_mood: 'editorial' } };
-        break;
-      }
-        // Otherwise, keep going or push a nudge
-        messages.push({ role: 'user', content: 'Please proceed with a tool call (tavily_search or finish_blog) to continue.' });
-        continue;
-      }
-    }
-
-    for (const call of msg.tool_calls) {
-      const args = JSON.parse(call.function.arguments);
-
-      if (call.function.name === 'tavily_search') {
-        if (tavilyCallCount >= MAX_TAVILY_CALLS) {
-          messages.push({ role: 'tool', tool_call_id: call.id, content: `BUDGET EXHAUSTED: You have used all ${MAX_TAVILY_CALLS} Tavily calls. You must now write the blog and call finish_blog().` });
-          continue;
-        }
-        tavilyCallCount++;
-        console.log(`[Content Agent] Tavily call ${tavilyCallCount}/${MAX_TAVILY_CALLS}: "${args.query}"`);
-        const result = await tavilySearch(args.query);
-        messages.push({
-          role: 'tool',
-          tool_call_id: call.id,
-          content: `${result}\n\n[Tavily calls remaining: ${MAX_TAVILY_CALLS - tavilyCallCount}]`,
-        });
-
-      } else if (call.function.name === 'finish_blog') {
-        console.log('[Content Agent] Blog received via finish_blog()');
-        args.content = stripGeneratedArtifacts(args.content);
-        blogResult = args;
-      }
-    }
-  }
-
-  return blogResult;
+  const { outline, research } = await runOutlineAgent(brand, pastSlugs, internalLinks, brandConfig);
+  await sleep(GENERATION_GAP_MS);
+  const content = await runWritingAgent(brand, outline, research, pastSlugs, internalLinks, brandConfig);
+  return {
+    content: content,
+    visual_brief: outline.visual_brief || { visual_brief: 'Editorial clarity', archetype_hint: 'B', dominant_mood: 'editorial', kicker: 'Insights' },
+  };
 }
 
 // ── Image Agent ───────────────────────────────────────────────────────────────
@@ -374,71 +416,76 @@ Return ONLY valid JSON with this structure:
 // ── Main orchestrator ─────────────────────────────────────────────────────────
 export async function runForBrand(brand) {
   const brandConfig = BRANDS[brand];
+  const locked = beginGeneration(brand, 'manual');
+  if (!locked.ok) {
+    const active = locked.activeGeneration;
+    throw new Error(`Generation already in progress for ${active.brand} (started ${active.startedAt})`);
+  }
   console.log(`\n[Blog Engine] === Starting generation for ${brandConfig.name} ===`);
 
   const pastSlugs = await getPastSlugs(brand, 20);
   const internalLinks = await getInternalLinks(brand, 8);
 
-  // Step 1: Content Agent (fully agentic)
-  const { contentResult, title: rawTitle, wordCount } = await generateValidContent(brand, pastSlugs, internalLinks, brandConfig);
+  try {
+    const { contentResult, title: rawTitle, wordCount } = await generateValidContent(brand, pastSlugs, internalLinks, brandConfig);
+    const imageResult = await runImageAgent(rawTitle, contentResult.visual_brief, brand);
+    const seo = extractSeoFields(contentResult.content, rawTitle, brand, brandConfig.canonicalBase);
 
-  // Step 2: 2-minute cooldown
-  console.log('[Blog Engine] ⏱ Cooldown: 120 seconds...');
-  await new Promise(r => setTimeout(r, 120_000));
+    const tomorrow = new Date();
+    tomorrow.setDate(tomorrow.getDate() + 1);
+    tomorrow.setHours(6, 0, 0, 0);
 
-  // Step 3: Extract title from content
-  // Step 4: Image Agent
-  const imageResult = await runImageAgent(rawTitle, contentResult.visual_brief, brand);
-
-  // Step 5: SEO extraction
-  const seo = extractSeoFields(contentResult.content, rawTitle, brand, brandConfig.canonicalBase);
-
-  // Step 6: Assemble + save draft
-  const tomorrow = new Date();
-  tomorrow.setDate(tomorrow.getDate() + 1);
-  tomorrow.setHours(6, 0, 0, 0);
-
-  const draft = {
-    id: seo.slug,
-    brand,
-    title: rawTitle,
-    slug: seo.slug,
-    content: contentResult.content,
-    visualBrief: contentResult.visual_brief,
-    frontMatter: {
+    const draft = {
+      id: seo.slug,
+      brand,
       title: rawTitle,
-      date: tomorrow.toISOString().split('T')[0],
-      author: brandConfig.author,
-      description: seo.metaDescription,
-      tags: seo.tags,
-      image: imageResult.imageUrl,
-      og_image: imageResult.imageUrl,
-      canonical: seo.canonicalUrl,
-      reading_time: seo.readingTime,
-      draft: false,
-      schema_type: 'Article',
-    },
-    status: 'generated',
-    imageUrl: imageResult.imageUrl,
-    archetype: imageResult.archetype,
-    seoScore: { wordCount: seo.wordCount, readingTime: seo.readingTime },
-    autoPublish: true,
-    scheduledAt: tomorrow,
-    createdAt: new Date(),
-  };
+      slug: seo.slug,
+      content: contentResult.content,
+      visualBrief: contentResult.visual_brief,
+      frontMatter: {
+        title: rawTitle,
+        date: tomorrow.toISOString().split('T')[0],
+        author: brandConfig.author,
+        description: seo.metaDescription,
+        tags: seo.tags,
+        image: imageResult.imageUrl,
+        og_image: imageResult.imageUrl,
+        canonical: seo.canonicalUrl,
+        reading_time: seo.readingTime,
+        draft: false,
+        schema_type: 'Article',
+      },
+      status: 'generated',
+      imageUrl: imageResult.imageUrl,
+      archetype: imageResult.archetype,
+      seoScore: { wordCount: seo.wordCount, readingTime: seo.readingTime },
+      autoPublish: true,
+      scheduledAt: tomorrow,
+      createdAt: new Date(),
+    };
 
-  await saveDraft(draft);
-  console.log(`[Blog Engine] ✅ Draft saved: "${rawTitle}" — scheduled for ${draft.frontMatter.date}`);
-  return draft;
+    await saveDraft(draft);
+    console.log(`[Blog Engine] ✅ Draft saved: "${rawTitle}" — scheduled for ${draft.frontMatter.date}`);
+    return draft;
+  } finally {
+    endGeneration();
+  }
 }
 
 export async function runBlogEngine() {
+  if (isGenerationRunning()) {
+    const active = activeGeneration;
+    console.log(`[Blog Engine] Generation already running for ${active.brand}; skipping scheduled run.`);
+    return null;
+  }
   const lastBrand = await getLastPublishedBrand();
   // Alternate: if last was saraf → casemate, if last was casemate → saraf, default to casemate
   const brand = lastBrand === 'saraf' ? 'casemate' : 'saraf';
   console.log(`[Blog Engine] Brand rotation: last was "${lastBrand || 'none'}" → generating for "${brand}"`);
   return runForBrand(brand);
 }
+
+export { isGenerationRunning };
 
 // ── CLI entry point ───────────────────────────────────────────────────────────
 if (process.argv.includes('--run-now')) {

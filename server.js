@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 import cron from 'node-cron';
 import multer from 'multer';
 import { connectDb } from './src/db/blogDb.js';
-import { runBlogEngine, runForBrand } from './src/blogEngine.js';
+import { isGenerationRunning, runBlogEngine, runForBrand } from './src/blogEngine.js';
 import { deployBlog, removeDeployedBlog } from './src/blogDeployer.js';
 import { getDrafts, getDraft, saveDraftEdits, deleteDraft, setAutoPublish, reschedule } from './src/db/blogDb.js';
 
@@ -130,6 +130,9 @@ blogRouter.put('/api/blog/draft/:id/auto-publish', async (req, res) => {
 blogRouter.post('/api/blog/generate', async (req, res) => {
   try {
     const { brand } = req.body;
+    if (isGenerationRunning()) {
+      return res.status(409).json({ ok: false, error: 'Blog generation is already running' });
+    }
     res.json({ ok: true, message: 'Generation started' });
     if (brand) {
       runForBrand(brand).catch(console.error);
